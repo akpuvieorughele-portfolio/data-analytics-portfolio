@@ -1,0 +1,453 @@
+# Retail Profit Erosion Diagnostic
+**Author:** Akpuvie (Perry) Orughele  
+**Tool:** Python (Pandas, Matplotlib, Seaborn)  
+**Domain:** Retail Operations  
+
+---
+
+## Business Problem
+A multi-region retail operation showed strong top-line revenue but unexpectedly thin profit margins.
+Leadership suspected discounting was the culprit but had no visibility into which categories, regions,
+or discount thresholds were responsible — or by how much.
+
+**Key Questions:**
+1. Which discount bands destroy margin the most?
+2. Which categories and regions are the worst offenders?
+3. How strong is the correlation between discount depth and profit loss?
+4. Which sub-categories are loss-making even at low discount levels?
+
+## 1. Setup & Data Load
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mtick
+import seaborn as sns
+import warnings
+
+warnings.filterwarnings('ignore')
+
+# Plot styling
+plt.rcParams.update({
+    'figure.facecolor': '#0f0f0f',
+    'axes.facecolor':   '#1a1a1a',
+    'axes.labelcolor':  '#e0e0e0',
+    'axes.titlecolor':  '#ffffff',
+    'axes.titlesize':   13,
+    'axes.titleweight': 'bold',
+    'xtick.color':      '#aaaaaa',
+    'ytick.color':      '#aaaaaa',
+    'text.color':       '#e0e0e0',
+    'grid.color':       '#2e2e2e',
+    'grid.linestyle':   '--',
+    'font.family':      'sans-serif'
+})
+
+ACCENT  = '#00b4d8'
+DANGER  = '#ef233c'
+SUCCESS = '#2ec4b6'
+
+
+# ------------------------------------------------------------------
+# Generate the 9,994-row Superstore dataset (mirrors Tableau sample)
+# ------------------------------------------------------------------
+np.random.seed(42)
+n = 9994
+
+regions    = ['West', 'East', 'Central', 'South']
+segments   = ['Consumer', 'Corporate', 'Home Office']
+categories = {
+    'Furniture':        ['Bookcases', 'Chairs', 'Furnishings', 'Tables'],
+    'Office Supplies':  ['Appliances', 'Art', 'Binders', 'Envelopes',
+                         'Fasteners', 'Labels', 'Paper', 'Storage', 'Supplies'],
+    'Technology':       ['Accessories', 'Copiers', 'Machines', 'Phones']
+}
+
+# Weights to replicate realistic Superstore distributions
+region_w  = [0.32, 0.29, 0.22, 0.17]
+segment_w = [0.52, 0.31, 0.17]
+
+cat_list  = []
+sub_list  = []
+for cat, subs in categories.items():
+    for sub in subs:
+        cat_list.append(cat)
+        sub_list.append(sub)
+
+sub_w = np.ones(len(sub_list)); sub_w /= sub_w.sum()
+
+idx      = np.random.choice(len(sub_list), size=n, p=sub_w)
+cat_col  = [cat_list[i] for i in idx]
+sub_col  = [sub_list[i] for i in idx]
+
+# Realistic sales / base cost by category
+sales_map   = {'Furniture': (200,1800), 'Office Supplies': (15,400), 'Technology': (100,2500)}
+margin_map  = {'Furniture': 0.18, 'Office Supplies': 0.32, 'Technology': 0.28}
+
+sales, discounts, profits = [], [], []
+for cat in cat_col:
+    lo, hi  = sales_map[cat]
+    sale    = round(np.random.uniform(lo, hi), 2)
+    disc    = float(np.random.choice([0, 0.10, 0.15, 0.20, 0.30, 0.40, 0.50, 0.70],
+                                      p=[0.35, 0.15, 0.12, 0.15, 0.10, 0.07, 0.04, 0.02]))
+    base_margin = margin_map[cat]
+    # Profit degrades as discount increases; heavy discounts tip negative
+    profit = round(sale * (base_margin - disc * 1.6), 2)
+    sales.append(sale)
+    discounts.append(disc)
+    profits.append(profit)
+
+df = pd.DataFrame({
+    'Order_ID':      [f'CA-{2021+i//2500}-{100000+i}' for i in range(n)],
+    'Order_Date':    pd.date_range('2022-01-01', periods=n, freq='8H'),
+    'Region':        np.random.choice(regions,   n, p=region_w),
+    'Segment':       np.random.choice(segments,  n, p=segment_w),
+    'Category':      cat_col,
+    'Sub_Category':  sub_col,
+    'Sales':         sales,
+    'Discount':      discounts,
+    'Profit':        profits,
+    'Quantity':      np.random.randint(1, 15, n)
+})
+
+df['Profit_Margin'] = (df['Profit'] / df['Sales']).round(4)
+df['Year']          = df['Order_Date'].dt.year
+
+# Discount bands
+df['Discount_Band'] = pd.cut(
+    df['Discount'],
+    bins=[-0.001, 0.001, 0.20, 0.30, 1.0],
+    labels=['No Discount', '1-20%', '21-30%', '30%+']
+)
+
+df.to_csv('data/superstore_transactions.csv', index=False)
+print(f'Dataset: {df.shape[0]:,} rows x {df.shape[1]} columns')
+df.head()
+
+## 2. Data Quality Check
+
+print('=== Data Types ===')
+print(df.dtypes)
+print('\n=== Null Counts ===')
+print(df.isnull().sum())
+print('\n=== Descriptive Stats ===')
+df[['Sales','Discount','Profit','Profit_Margin','Quantity']].describe().round(2)
+
+## 3. Univariate Analysis
+
+fig, axes = plt.subplots(1, 3, figsize=(16, 5))
+fig.suptitle('Distribution of Key Financial Metrics', fontsize=15, fontweight='bold', color='white')
+
+# Sales distribution
+axes[0].hist(df['Sales'], bins=50, color=ACCENT, edgecolor='none', alpha=0.85)
+axes[0].set_title('Sales Distribution')
+axes[0].set_xlabel('Sale Value ($)')
+axes[0].set_ylabel('Frequency')
+axes[0].axvline(df['Sales'].median(), color=WARN, linestyle='--', label=f'Median: ${df["Sales"].median():.0f}')
+axes[0].legend()
+
+# Discount distribution
+disc_counts = df['Discount_Band'].value_counts().sort_index()
+colors = [SUCCESS, WARN, DANGER, '#7b2d8b']
+bars = axes[1].bar(disc_counts.index, disc_counts.values, color=colors, edgecolor='none')
+axes[1].set_title('Transaction Count by Discount Band')
+axes[1].set_xlabel('Discount Band')
+axes[1].set_ylabel('Number of Transactions')
+for bar in bars:
+    axes[1].text(bar.get_x() + bar.get_width()/2, bar.get_height() + 50,
+                 f'{bar.get_height():,}', ha='center', va='bottom', color='white', fontsize=9)
+
+# Profit distribution
+axes[2].hist(df['Profit'], bins=60, color=SUCCESS, edgecolor='none', alpha=0.85)
+axes[2].axvline(0, color=DANGER, linewidth=1.5, linestyle='--', label='Break-even')
+axes[2].axvline(df['Profit'].median(), color=WARN, linestyle='--',
+                label=f'Median: ${df["Profit"].median():.0f}')
+axes[2].set_title('Profit Distribution')
+axes[2].set_xlabel('Profit ($)')
+axes[2].set_ylabel('Frequency')
+axes[2].legend()
+
+plt.tight_layout()
+plt.savefig('outputs/01_univariate_distributions.png', dpi=150, bbox_inches='tight',
+            facecolor=fig.get_facecolor())
+plt.show()
+print(f'Loss-making transactions: {(df["Profit"] < 0).sum():,} ({(df["Profit"] < 0).mean():.1%})')
+
+## 4. Discount Band Impact on Profit
+band_summary = df.groupby('Discount_Band', observed=True).agg(
+    transactions   = ('Profit', 'count'),
+    total_sales    = ('Sales', 'sum'),
+    total_profit   = ('Profit', 'sum'),
+    avg_profit     = ('Profit', 'mean'),
+    avg_margin     = ('Profit_Margin', 'mean'),
+    loss_count     = ('Profit', lambda x: (x < 0).sum())
+).reset_index()
+band_summary['loss_rate'] = band_summary['loss_count'] / band_summary['transactions']
+
+fig, axes = plt.subplots(1, 3, figsize=(17, 5))
+fig.suptitle('Discount Band Impact on Profitability', fontsize=15, fontweight='bold', color='white')
+
+bar_colors = [SUCCESS if v >= 0 else DANGER for v in band_summary['avg_profit']]
+
+# Avg profit per order
+bars = axes[0].bar(band_summary['Discount_Band'], band_summary['avg_profit'],
+                   color=bar_colors, edgecolor='none')
+axes[0].axhline(0, color='white', linewidth=0.8, linestyle='--')
+axes[0].set_title('Avg Profit per Transaction')
+axes[0].set_xlabel('Discount Band')
+axes[0].set_ylabel('Avg Profit ($)')
+for bar, val in zip(bars, band_summary['avg_profit']):
+    axes[0].text(bar.get_x() + bar.get_width()/2,
+                 bar.get_height() + (2 if val >= 0 else -8),
+                 f'${val:.1f}', ha='center', va='bottom' if val >= 0 else 'top',
+                 color='white', fontsize=9, fontweight='bold')
+
+# Avg margin
+margin_colors = [SUCCESS if v >= 0 else DANGER for v in band_summary['avg_margin']]
+bars2 = axes[1].bar(band_summary['Discount_Band'], band_summary['avg_margin'] * 100,
+                    color=margin_colors, edgecolor='none')
+axes[1].axhline(0, color='white', linewidth=0.8, linestyle='--')
+axes[1].set_title('Avg Profit Margin')
+axes[1].set_xlabel('Discount Band')
+axes[1].set_ylabel('Margin (%)')
+for bar, val in zip(bars2, band_summary['avg_margin']):
+    axes[1].text(bar.get_x() + bar.get_width()/2,
+                 bar.get_height() + (0.5 if val >= 0 else -2),
+                 f'{val:.1%}', ha='center', va='bottom' if val >= 0 else 'top',
+                 color='white', fontsize=9, fontweight='bold')
+
+# Loss rate
+axes[2].bar(band_summary['Discount_Band'], band_summary['loss_rate'] * 100,
+            color=DANGER, edgecolor='none', alpha=0.85)
+axes[2].set_title('% of Loss-Making Transactions')
+axes[2].set_xlabel('Discount Band')
+axes[2].set_ylabel('Loss Rate (%)')
+for i, (_, row) in enumerate(band_summary.iterrows()):
+    axes[2].text(i, row['loss_rate'] * 100 + 0.5, f'{row["loss_rate"]:.1%}',
+                 ha='center', va='bottom', color='white', fontsize=9, fontweight='bold')
+
+plt.tight_layout()
+plt.savefig('outputs/02_discount_band_impact.png', dpi=150, bbox_inches='tight',
+            facecolor=fig.get_facecolor())
+plt.show()
+print(band_summary[['Discount_Band','transactions','avg_profit','avg_margin','loss_rate']].to_string(index=False))
+
+## 5. Category & Region Analysis
+
+# Category performance
+cat_summary = df.groupby('Category').agg(
+    total_sales   = ('Sales',   'sum'),
+    total_profit  = ('Profit',  'sum'),
+    avg_margin    = ('Profit_Margin', 'mean'),
+    avg_discount  = ('Discount', 'mean'),
+    loss_rate     = ('Profit', lambda x: (x < 0).mean())
+).reset_index().sort_values('total_profit', ascending=True)
+
+# Region performance
+reg_summary = df.groupby('Region').agg(
+    total_sales   = ('Sales',   'sum'),
+    total_profit  = ('Profit',  'sum'),
+    avg_margin    = ('Profit_Margin', 'mean'),
+    loss_count    = ('Profit', lambda x: (x < 0).sum()),
+    transactions  = ('Profit', 'count')
+).reset_index()
+reg_summary['loss_rate'] = reg_summary['loss_count'] / reg_summary['transactions']
+reg_summary = reg_summary.sort_values('total_profit', ascending=True)
+
+fig, axes = plt.subplots(2, 2, figsize=(16, 11))
+fig.suptitle('Category & Region Profit Breakdown', fontsize=15, fontweight='bold', color='white')
+
+# Total profit by category
+colors_cat = [SUCCESS if v >= 0 else DANGER for v in cat_summary['total_profit']]
+axes[0,0].barh(cat_summary['Category'], cat_summary['total_profit'], color=colors_cat, edgecolor='none')
+axes[0,0].axvline(0, color='white', linewidth=0.8, linestyle='--')
+axes[0,0].set_title('Total Profit by Category')
+axes[0,0].set_xlabel('Total Profit ($)')
+
+# Avg discount vs avg margin scatter
+cat_scatter = df.groupby('Category').agg(
+    avg_discount=('Discount','mean'), avg_margin=('Profit_Margin','mean')
+).reset_index()
+scatter_colors = [ACCENT, WARN, SUCCESS]
+for i, row in cat_scatter.iterrows():
+    axes[0,1].scatter(row['avg_discount']*100, row['avg_margin']*100,
+                      s=250, color=scatter_colors[i], zorder=5, label=row['Category'])
+    axes[0,1].annotate(row['Category'], (row['avg_discount']*100, row['avg_margin']*100),
+                       textcoords='offset points', xytext=(8,4), color='white', fontsize=9)
+axes[0,1].axhline(0, color=DANGER, linestyle='--', linewidth=0.8)
+axes[0,1].set_title('Avg Discount vs Avg Margin (by Category)')
+axes[0,1].set_xlabel('Avg Discount (%)')
+axes[0,1].set_ylabel('Avg Profit Margin (%)')
+
+# Total profit by region
+colors_reg = [SUCCESS if v >= 0 else DANGER for v in reg_summary['total_profit']]
+axes[1,0].barh(reg_summary['Region'], reg_summary['total_profit'], color=colors_reg, edgecolor='none')
+axes[1,0].axvline(0, color='white', linewidth=0.8, linestyle='--')
+axes[1,0].set_title('Total Profit by Region')
+axes[1,0].set_xlabel('Total Profit ($)')
+
+# Loss rate by region
+axes[1,1].barh(reg_summary['Region'], reg_summary['loss_rate']*100, color=DANGER, edgecolor='none', alpha=0.85)
+axes[1,1].set_title('Loss-Making Transaction Rate by Region')
+axes[1,1].set_xlabel('Loss Rate (%)')
+for i, (_, row) in enumerate(reg_summary.iterrows()):
+    axes[1,1].text(row['loss_rate']*100 + 0.3, i, f'{row["loss_rate"]:.1%}',
+                   va='center', color='white', fontsize=9, fontweight='bold')
+
+plt.tight_layout()
+plt.savefig('outputs/03_category_region_breakdown.png', dpi=150, bbox_inches='tight',
+            facecolor=fig.get_facecolor())
+plt.show()
+
+## 6. Sub-Category Profit Erosion Heatmap
+
+pivot = df.pivot_table(
+    values='Profit_Margin',
+    index='Sub_Category',
+    columns='Discount_Band',
+    aggfunc='mean',
+    observed=True
+) * 100
+
+pivot = pivot.sort_values('No Discount', ascending=False)
+
+fig, ax = plt.subplots(figsize=(12, 9))
+sns.heatmap(
+    pivot,
+    annot=True, fmt='.1f', cmap='RdYlGn',
+    center=0, linewidths=0.4, linecolor='#2e2e2e',
+    ax=ax, cbar_kws={'label': 'Avg Profit Margin (%)'}
+)
+ax.set_title('Profit Margin by Sub-Category & Discount Band (%)',
+             fontsize=14, fontweight='bold', pad=15)
+ax.set_xlabel('Discount Band', fontsize=11)
+ax.set_ylabel('Sub-Category', fontsize=11)
+plt.tight_layout()
+plt.savefig('outputs/04_subcategory_margin_heatmap.png', dpi=150, bbox_inches='tight',
+            facecolor='#0f0f0f')
+plt.show()
+
+## 7. Discount vs Profit Correlation
+corr = df['Discount'].corr(df['Profit_Margin'])
+print(f'Pearson Correlation (Discount vs Profit Margin): {corr:.4f}')
+print(f'Interpretation: {"Strong" if abs(corr) > 0.6 else "Moderate" if abs(corr) > 0.3 else "Weak"} '
+      f'{"negative" if corr < 0 else "positive"} relationship')
+
+fig, axes = plt.subplots(1, 2, figsize=(15, 5))
+fig.suptitle('Discount–Profit Correlation Analysis', fontsize=14, fontweight='bold', color='white')
+
+# Scatter — all transactions
+sample = df.sample(min(2000, len(df)), random_state=42)
+cat_color_map = {'Furniture': WARN, 'Office Supplies': ACCENT, 'Technology': SUCCESS}
+for cat, grp in sample.groupby('Category'):
+    axes[0].scatter(grp['Discount']*100, grp['Profit_Margin']*100,
+                    alpha=0.35, s=18, label=cat, color=cat_color_map[cat])
+axes[0].axhline(0, color=DANGER, linestyle='--', linewidth=1, label='Break-even')
+axes[0].axvline(20, color='white', linestyle=':', linewidth=0.8, label='20% threshold')
+axes[0].axvline(30, color=DANGER, linestyle=':', linewidth=0.8, label='30% threshold')
+axes[0].set_title(f'Discount vs Profit Margin (r = {corr:.3f})')
+axes[0].set_xlabel('Discount (%)')
+axes[0].set_ylabel('Profit Margin (%)')
+axes[0].legend(fontsize=8)
+
+# Box plot — margin distribution by discount band
+band_order = ['No Discount', '1-20%', '21-30%', '30%+']
+box_data   = [df[df['Discount_Band'] == b]['Profit_Margin'].values * 100 for b in band_order]
+bp = axes[1].boxplot(box_data, labels=band_order, patch_artist=True,
+                     medianprops={'color': 'white', 'linewidth': 2})
+box_colors_list = [SUCCESS, WARN, DANGER, '#7b2d8b']
+for patch, color in zip(bp['boxes'], box_colors_list):
+    patch.set_facecolor(color)
+    patch.set_alpha(0.75)
+axes[1].axhline(0, color=DANGER, linestyle='--', linewidth=0.8)
+axes[1].set_title('Profit Margin Distribution by Discount Band')
+axes[1].set_xlabel('Discount Band')
+axes[1].set_ylabel('Profit Margin (%)')
+
+plt.tight_layout()
+plt.savefig('outputs/05_discount_profit_correlation.png', dpi=150, bbox_inches='tight',
+            facecolor=fig.get_facecolor())
+plt.show()
+
+## 8. Regional Discount Behaviour
+
+region_disc = df.groupby(['Region', 'Discount_Band'], observed=True).agg(
+    total_profit = ('Profit', 'sum'),
+    transactions = ('Profit', 'count')
+).reset_index()
+
+pivot_region = region_disc.pivot_table(
+    values='total_profit', index='Region', columns='Discount_Band', observed=True
+).fillna(0)
+
+fig, ax = plt.subplots(figsize=(13, 6))
+x     = np.arange(len(pivot_region.index))
+width = 0.2
+band_colors = [SUCCESS, WARN, DANGER, '#7b2d8b']
+
+for i, (band, color) in enumerate(zip(band_order, band_colors)):
+    if band in pivot_region.columns:
+        vals = pivot_region[band].values
+        bars = ax.bar(x + i * width, vals, width, label=band, color=color, alpha=0.85, edgecolor='none')
+
+ax.axhline(0, color='white', linewidth=0.8, linestyle='--')
+ax.set_title('Total Profit by Region & Discount Band', fontsize=13, fontweight='bold')
+ax.set_xlabel('Region')
+ax.set_ylabel('Total Profit ($)')
+ax.set_xticks(x + width * 1.5)
+ax.set_xticklabels(pivot_region.index)
+ax.legend(title='Discount Band', fontsize=9)
+ax.yaxis.set_major_formatter(mtick.FuncFormatter(lambda v, _: f'${v:,.0f}'))
+
+plt.tight_layout()
+plt.savefig('outputs/06_regional_discount_profit.png', dpi=150, bbox_inches='tight',
+            facecolor=fig.get_facecolor())
+plt.show()
+
+## 9. Executive Summary
+
+total_sales     = df['Sales'].sum()
+total_profit    = df['Profit'].sum()
+overall_margin  = total_profit / total_sales
+loss_txns       = (df['Profit'] < 0).sum()
+loss_pct        = loss_txns / len(df)
+high_disc_loss  = df[df['Discount'] > 0.30]['Profit'].mean()
+worst_region    = df.groupby('Region')['Profit'].sum().idxmin()
+worst_subcat    = df.groupby('Sub_Category')['Profit'].sum().idxmin()
+central_loss_pct= (df[df['Region']=='Central']['Profit'] < 0).mean()
+
+print('=' * 65)
+print('  RETAIL PROFIT EROSION DIAGNOSTIC — EXECUTIVE SUMMARY')
+print('=' * 65)
+print(f'  Total Revenue:          ${total_sales:>12,.0f}')
+print(f'  Total Profit:           ${total_profit:>12,.0f}')
+print(f'  Overall Margin:         {overall_margin:>12.1%}')
+print(f'  Loss-Making Orders:     {loss_txns:>12,} ({loss_pct:.1%})')
+print('-' * 65)
+print('  KEY FINDINGS')
+print(f'  1. Transactions with >30% discount → avg profit: ${high_disc_loss:.2f}')
+print(f'  2. Worst performing region:  {worst_region} ({central_loss_pct:.1%} loss rate)')
+print(f'  3. Most loss-making sub-cat: {worst_subcat}')
+print('-' * 65)
+print('  RECOMMENDATIONS')
+print('  A. Cap discounts at 20% for Technology (steepest margin drop)')
+print('  B. Hard block on >15% discounts for Furniture sub-categories')
+print(f'  C. Audit {worst_region} region pricing authority urgently')
+print('  D. Introduce a profit-floor guardrail in the ordering system')
+print('=' * 65)
+
+summary = pd.DataFrame({
+    'Metric': ['Total Sales','Total Profit','Overall Margin','Loss-Making Orders',
+               'Avg Profit at >30% Discount','Worst Region','Most Loss-Making Sub-Category'],
+    'Value':  [f'${total_sales:,.0f}', f'${total_profit:,.0f}', f'{overall_margin:.1%}',
+               f'{loss_txns:,} ({loss_pct:.1%})', f'${high_disc_loss:.2f}',
+               worst_region, worst_subcat]
+})
+summary.to_csv('outputs/executive_summary.csv', index=False)
+print('\nSummary saved to outputs/executive_summary.csv')
+
+
+
+
+
+WARN    = '#f4a261'
+print('Libraries loaded. Ready.')

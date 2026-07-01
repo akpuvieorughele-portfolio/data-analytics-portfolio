@@ -1,0 +1,36 @@
+# Hospital Operations Intelligence Dashboard
+
+**Tool:** Power BI (DAX) | **Domain:** Healthcare / Clinical Operations | **Type:** Interactive BI Dashboard
+
+---
+
+## Business Problem
+
+Healthcare operational reporting typically surfaces activity volumes without connecting them to the clinical workflow decisions that matter. Generic dashboards built without clinical experience often track the wrong things. This project was built with direct perioperative experience (Operating Department Practitioner background) to ensure the metrics reflect actual clinical decision-making needs.
+
+## Approach
+
+- Selected KPIs grounded in clinical operational priority: theatre utilization, emergency admission conversion rates, average length of stay by specialty, and bed turnaround time
+- Built DAX measures for time-intelligence comparisons (WoW, MoM, rolling 4-week averages)
+- Designed drill-through pages enabling specialty-level investigation from ward-level summaries
+- Applied NHS RTT (Referral to Treatment) reporting logic to waiting list analysis
+
+## Key Findings
+
+- Theatre utilization averaged 74% against an 85% operational target, with the gap concentrated in afternoon sessions
+- Emergency-to-admission conversion rate varied 22 percentage points between the highest and lowest performing wards
+- Average length of stay exceeded specialty benchmarks in 3 of 7 surgical categories
+
+## Recommendation
+
+Target afternoon session utilization with a scheduling review. Investigate the high-converting wards for transferable admission criteria practices.
+
+---
+
+## Live Dashboard
+
+[View on Power BI](https://app.powerbi.com/view?r=eyJrIjoiZTFlNTJlMmEtMThkOC00ZmJmLWEwYmQtYTQ2ZjVkMTcwMzFjIiwidCI6ImU3OGY2MzhjLTk0YjEtNGM1ZC1iMjgwLTNiMjQzZDA5NTY2YiJ9)
+
+---
+
+[Back to Portfolio](../README.md)
